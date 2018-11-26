@@ -131,7 +131,7 @@ def train_network(model,
             optimizer.zero_grad()
 
             with torch.set_grad_enabled(True):
-                outputs = model(inputs)
+                outputs = model.forward(inputs)
                 _, preds = torch.max(outputs, 1)
                 loss = criterion(outputs, labels)
                 loss.backward()
@@ -146,25 +146,25 @@ def train_network(model,
         print('Training loss epochs[{}]: {:.4f} Acc: {:.4f}'.format(epoch, epoch_loss, epoch_acc))
 
         # Validate
-        running_loss = 0.0
-        running_corrects = 0
-        model.eval()
-        for inputs, labels in testloader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
+        # running_loss = 0.0
+        # running_corrects = 0
+        # model.eval()
+        # for inputs, labels in testloader:
+        #     inputs, labels = inputs.to(device), labels.to(device)
+        #     optimizer.zero_grad()
 
-            with torch.set_grad_enabled(True):
-                outputs = model(inputs)
-                _, preds = torch.max(outputs, 1)
-                loss = criterion(outputs, labels)
+        #     with torch.set_grad_enabled(False):
+        #         outputs = model(inputs)
+        #         _, preds = torch.max(outputs, 1)
+        #         loss = criterion(outputs, labels)
 
-            # Stats
-            running_loss += loss.item() * inputs.size(0)
-            running_corrects += torch.sum(preds == labels.data)
+        #     # Stats
+        #     running_loss += loss.item() * inputs.size(0)
+        #     running_corrects += torch.sum(preds == labels.data)
 
-        epoch_loss = running_loss / testdata_len
-        epoch_acc = running_corrects.double() / testdata_len
-        print('Validation loss epochs[{}]: {:.4f} Acc: {:.4f}'.format(epoch, epoch_loss, epoch_acc))
+        # epoch_loss = running_loss / testdata_len
+        # epoch_acc = running_corrects.double() / testdata_len
+        # print('Validation loss epochs[{}]: {:.4f} Acc: {:.4f}'.format(epoch, epoch_loss, epoch_acc))
 
 
 def save_model_checkpoint(arch_name, model, train_data, hidden_units, labels_count, save_dir):
