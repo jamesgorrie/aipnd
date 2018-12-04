@@ -2,11 +2,11 @@ import argparse
 import torch
 from torchvision import datasets, transforms, models
 from PIL import Image
-from train import setup_network
+from train import load_model
 
 # TODO:
 # - Not use top_k if there is no top_k
-# - use cahtegory_names
+# - use category_names
 
 def predict(image_path, checkpoint, category_names, top_k):
   top_k = top_k if top_k is not None else 5
@@ -26,11 +26,11 @@ def predict(image_path, checkpoint, category_names, top_k):
       # return probabilities.topk(top_k)
 
 def load_model_from_checkpoint(checkpoint):
-  checkpoint = torch.load('{}'.format(checkpoint))
-  label_count = len(checkpoint['class_to_idx'])
-  model_name = checkpoint['arch_name']
+  checkpoint = torch.load(checkpoint)
+  num_labels = len(checkpoint['class_to_idx'])
+  arch_name = checkpoint['arch_name']
   hidden_units = checkpoint['hidden_units']
-  model, _, _ = setup_network(model_name, hidden_units, label_count)
+  model = load_model(arch_name, 0.001, hidden_units, num_labels)
   model.class_to_idx = checkpoint['class_to_idx']
   model.load_state_dict(checkpoint['state_dict'])
 
