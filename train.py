@@ -1,62 +1,72 @@
 import argparse
+import json
+import os
+import copy
+import time
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import json
-import os
-from collections import OrderedDict
 from torchvision import datasets, transforms, models
+from collections import OrderedDict
 
-def train(data_dir, arch_name, learning_rate, hidden_units, epochs, gpu, save_dir, labels_count):
+from workspace_utils import keep_awake
+
+def train(data_dir, arch_name, learning_rate, hidden_units, epochs, gpu, save_dir, num_labels):
     device = torch.device('cuda' if torch.cuda.is_available() and gpu else "cpu")
-    train_data, test_data = get_data_and_loaders(data_dir)
+    train_data, test_data, valid_data = get_data_and_loaders(data_dir)
 
     # Setup the loaders
-    trainloader = torch.utils.data.DataLoader(train_data, batch_size=4, shuffle=True)
-    testloader = torch.utils.data.DataLoader(test_data, batch_size=4)
+    model = load_model(arch_name, learning_rate, hidden_units, num_labels)
+    train_network(model,
+                  train_data,
+                  valid_data,
+                  learning_rate,
+                  epochs,
+                  device)
 
-    model, criterion, optimizer = setup_network(arch_name, learning_rate, labels_count)
-
-    # Taken from: https://pytorch.org/tutorials/beginner/transfer_learning_tutorial.html
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
-
-    train_network(model, criterion, optimizer, trainloader, testloader,
-                  len(train_data), len(train_data), scheduler, epochs, device)
-    save_model_checkpoint(arch_name, model, train_data, hidden_units, labels_count, save_dir)
+    save_model_checkpoint(arch_name, model, train_data, hidden_units, learning_rate)
 
 def getArch(arch_name):
-    archs = {
-        'vgg13': {
+    print('Looking for {}'.format(arch_name))
+    if arch_name == 'vgg13':
+        return {
             'model': models.vgg13(pretrained=True),
             'classifier_inputs': 25088,
             'hidden_layer_outs': 4096
-        },
-        'vgg16': {
+        }
+
+    if arch_name == 'vgg16':
+        return  {
             'model': models.vgg16(pretrained=True),
             'classifier_inputs': 25088,
             'hidden_layer_outs': 4096
-        },
-        'vgg19': {
+        }
+
+    if arch_name == 'vgg19':
+        return {
             'model': models.vgg19(pretrained=True),
             'classifier_inputs': 25088,
             'hidden_layer_outs': 4096
-        },
-        'densenet121': {
+        }
+
+    if arch_name == 'densenet121':
+        return {
             'model': models.densenet121(pretrained=True),
             'classifier_inputs': 1024,
             'hidden_layer_outs': 120
-        },
-        'alexnet': {
+        }
+
+    if arch_name == 'alexnet':
+        return {
             'model': models.alexnet(pretrained=True),
             'classifier_inputs': 9216,
             'hidden_layer_outs': 120
         }
-    }
-
-    return archs[arch_name]
 
 def get_data_and_loaders(data_dir):
     train_dir = data_dir + '/train'
+    valid_dir = data_dir + '/valid'
     test_dir = data_dir + '/test'
 
     image_norm_mean = [0.485, 0.456, 0.406]
@@ -73,16 +83,25 @@ def get_data_and_loaders(data_dir):
                                           transforms.ToTensor(),
                                           transforms.Normalize(image_norm_mean,
                                                                image_norm_std)])
+    valid_transforms = transforms.Compose([transforms.Resize(255),
+                                           transforms.CenterCrop(224),
+                                           transforms.ToTensor(),
+                                           transforms.Normalize(image_norm_mean,
+                                                                image_norm_std)])
 
     # Step: Data loading
     train_data = datasets.ImageFolder(train_dir, transform=train_transforms)
     test_data = datasets.ImageFolder(test_dir, transform=test_transforms)
+    valid_data = datasets.ImageFolder(valid_dir, transform=valid_transforms)
 
-    return train_data, test_data
+    return train_data, test_data, valid_data
 
-def setup_network(arch_name, learning_rate, labels_count):
+def load_model(arch_name, learning_rate, hidden_units, num_labels):
     arch = getArch(arch_name)
     model = arch['model']
+    dropout = 0.5
+
+    num_filters = arch['classifier_inputs']
 
     # Step: Pretrained Network
     # Freeze the params
@@ -90,96 +109,114 @@ def setup_network(arch_name, learning_rate, labels_count):
         param.requires_grad = False
 
     # Step: Feedforward Classifier
-    classifier = nn.Sequential(OrderedDict([('dropout', nn.Dropout(p=0.15)),
-                                            ('fc1', nn.Linear(arch['classifier_inputs'],
-                                                              arch['hidden_layer_outs'])),
-                                            ('relu1', nn.ReLU()),
-                                            ('fc2', nn.Linear(arch['hidden_layer_outs'],
-                                                              labels_count)),
-                                            ('relu2', nn.ReLU()),
-                                            ('output', nn.LogSoftmax(dim=1))]))
-    model.classifier = classifier
-    criterion = nn.NLLLoss()
-    optimizer = optim.Adam(model.classifier.parameters(), lr=learning_rate)
+    classifier = nn.Sequential(OrderedDict([
+            ('dropout1', nn.Dropout(dropout)),
+            ('fc1', nn.Linear(num_filters, hidden_units)),
+            ('relu1', nn.ReLU(True)),
+            ('dropout2', nn.Dropout(dropout)),
+            ('fc2', nn.Linear(hidden_units, hidden_units)),
+            ('relu2', nn.ReLU(True)),
+            ('fc3', nn.Linear(hidden_units, num_labels)),
+            ]))
 
-    return model, criterion, optimizer
+    model.classifier = classifier
+    return model
 
 def train_network(model,
-                  criterion,
-                  optimizer,
-                  trainloader,
-                  testloader,
-                  traindata_len,
-                  testdata_len,
-                  scheduler,
+                  train_data,
+                  valid_data,
+                  learning_rate,
                   epochs,
                   device='cpu'):
 
+    dataloaders = {
+        'train': torch.utils.data.DataLoader(train_data, batch_size=4, shuffle=True),
+        'valid': torch.utils.data.DataLoader(valid_data, batch_size=4)
+    }
+    data_sizes = {
+        'train': len(train_data),
+        'valid': len(valid_data)
+    }
+
     model.to(device)
+    criterion = nn.CrossEntropyLoss()
+    # Optimizing only the params that need optimisation
+    optimizer = optim.SGD(list(filter(lambda p: p.requires_grad, model.parameters())), lr=learning_rate, momentum=0.9)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
 
-    # Step: Training the network
-    for epoch in range(epochs):
-        print('Starting epochs[{}]'.format(epoch))
+    since = time.time()
+    best_model_wts = copy.deepcopy(model.state_dict())
+    best_acc = 0.0
 
-        # Train
-        running_loss = 0.0
-        running_corrects = 0
-        scheduler.step()
-        model.train()
-        for inputs, labels in trainloader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
+    # https://pytorch.org/tutorials/beginner/transfer_learning_tutorial.html
+    # I found this method gave me the best results, and seemed a little more
+    # complete and logical
+    for epoch in keep_awake(range(epochs)):
+        print('Starting Epoch {}/{}'.format(epoch + 1, epochs))
+        print('~' * 12)
 
-            with torch.set_grad_enabled(True):
-                outputs = model.forward(inputs)
-                _, preds = torch.max(outputs, 1)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                optimizer.step()
+        for phase in ['train', 'valid']:
+            if phase == 'train':
+                scheduler.step()
+                model.train()
+            else:
+                model.eval()
 
-            # Stats
-            running_loss += loss.item() * inputs.size(0)
-            running_corrects += torch.sum(preds == labels.data)
+            running_loss = 0.0
+            running_corrects = 0
 
-        epoch_loss = running_loss / traindata_len
-        epoch_acc = running_corrects.double() / traindata_len
-        print('Training loss epochs[{}]: {:.4f} Acc: {:.4f}'.format(epoch, epoch_loss, epoch_acc))
+            for inputs, labels in dataloaders[phase]:
+                inputs = inputs.to(device)
+                labels = labels.to(device)
 
-        # Validate
-        # running_loss = 0.0
-        # running_corrects = 0
-        # model.eval()
-        # for inputs, labels in testloader:
-        #     inputs, labels = inputs.to(device), labels.to(device)
-        #     optimizer.zero_grad()
+                optimizer.zero_grad()
 
-        #     with torch.set_grad_enabled(False):
-        #         outputs = model(inputs)
-        #         _, preds = torch.max(outputs, 1)
-        #         loss = criterion(outputs, labels)
+                with torch.set_grad_enabled(phase == 'train'):
+                    outputs = model(inputs)
+                    _, preds = torch.max(outputs, 1)
+                    loss = criterion(outputs, labels)
 
-        #     # Stats
-        #     running_loss += loss.item() * inputs.size(0)
-        #     running_corrects += torch.sum(preds == labels.data)
+                    if phase == 'train':
+                        loss.backward()
+                        optimizer.step()
 
-        # epoch_loss = running_loss / testdata_len
-        # epoch_acc = running_corrects.double() / testdata_len
-        # print('Validation loss epochs[{}]: {:.4f} Acc: {:.4f}'.format(epoch, epoch_loss, epoch_acc))
+                running_loss += loss.item() * inputs.size(0)
+                running_corrects += torch.sum(preds == labels.data)
 
+            epoch_loss = running_loss / data_sizes[phase]
+            epoch_acc = running_corrects.double() / data_sizes[phase]
 
-def save_model_checkpoint(arch_name, model, train_data, hidden_units, labels_count, save_dir):
-    # Directories are a pain to deal with, so I'm leaving them for now as it doesn't really prove anything
-    # os.mkdir(save_dir)
-    arch = getArch(arch_name)
+            print('{} Loss: {:.4f} Accuracy: {:.4f}'.format(
+                phase, epoch_loss, epoch_acc))
+
+            # deep copy the model
+            if phase == 'valid' and epoch_acc > best_acc:
+                best_acc = epoch_acc
+                best_model_wts = copy.deepcopy(model.state_dict())
+
+        print()
+
+    time_elapsed = time.time() - since
+    print('Training complete in {:.0f}m {:.0f}s'.format(
+        time_elapsed // 60, time_elapsed % 60))
+    print('Best val Acc: {:4f}'.format(best_acc))
+
+    # Load best model weights
+    model.load_state_dict(best_model_wts)
+
+    # Store class_to_idx into a model property
     model.class_to_idx = train_data.class_to_idx
+    return model
+
+
+def save_model_checkpoint(arch_name, model, train_data, hidden_units, learning_rate):
     model.cpu
-    torch.save({'arch_name': arch_name,
-                'hidden_units': hidden_units,
-                'state_dict': model.state_dict(),
-                'class_to_idx': model.class_to_idx,
-                'input_size': arch['classifier_inputs'],
-                'output_size': labels_count},
-                '{0}_checkpoint_{1}_{2}.pth'.format(save_dir, arch_name, hidden_units))
+    model.class_to_idx = train_data.class_to_idx
+    torch.save({'structure': arch_name,
+                'hidden_layer1': 120,
+                'state_dict':model.state_dict(),
+                'class_to_idx':model.class_to_idx},
+                'checkpoint_{}_{}_{}.pth'.format(arch_name, hidden_units, learning_rate))
 
 # CMD
 parser = argparse.ArgumentParser()
@@ -190,14 +227,14 @@ parser.add_argument('data_dir',
 parser.add_argument('--arch',
                     type=str,
                     help='Which pretrained architechture to use',
-                    default='vgg13')
+                    default='vgg19')
 parser.add_argument('--learning_rate',
                     type=float,
                     help='The rate at which the training will learn',
                     default=0.001)
 parser.add_argument('--hidden_units',
                     type=int, help='How many hidden layers in the classifier training',
-                    default=512)
+                    default=4096)
 parser.add_argument('--epochs',
                     type=int,
                     help='How many rounds we\'ll do the forwardpass and back propegation',
@@ -210,7 +247,7 @@ parser.add_argument('--save_dir',
                     help='Where we will keep you checkpoints safe for you',
                     type=str,
                     default='checkpoints')
-parser.add_argument('--labels_count',
+parser.add_argument('--num_labels',
                     help='How many classifications are you going to have?',
                     type=int,
                     default=102)
@@ -228,4 +265,4 @@ if __name__ == '__main__':
       args.epochs,
       args.gpu,
       args.save_dir,
-      args.labels_count)
+      args.num_labels)
