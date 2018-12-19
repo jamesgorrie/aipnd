@@ -4,7 +4,7 @@ A lot of inspiration and knowledge has been taken
 from [Pytorche's great tutorials](https://pytorch.org/tutorials/),
 specifically the [tutorial on transfer learning](https://pytorch.org/tutorials/beginner/transfer_learning_tutorial.html).
 
-## Pain points
+## Pain points
 The programming in and of itself is actually quite straight forward,
 but I was receiving really low accuracy results from the training.
 
