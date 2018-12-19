@@ -3,38 +3,52 @@ import torch
 from torchvision import datasets, transforms, models
 from PIL import Image
 from train import load_model
+import torch.nn.functional as F
+import json
 
 # TODO:
 # - Not use top_k if there is no top_k
 # - use category_names
 
 def predict(image_path, checkpoint, category_names, top_k):
-  top_k = top_k if top_k is not None else 5
-  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-  image = image_to_numpy(image_path)
-  model = load_model_from_checkpoint(checkpoint)
-  model.to(device)
-  with torch.no_grad():
-      # https://discuss.pytorch.org/t/expected-stride-to-be-a-single-integer-value-or-a-list/17612
-      image = image.to(device).unsqueeze_(0)
+    top_k = top_k if top_k is not None else 5
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    image = image_to_numpy(image_path)
+    checkpoint_dict = torch.load(checkpoint)
+    # GOTCHA: Not sure why I used structure, must have been somewhere
+    # I read, but should be arch_name
+    arch_name = checkpoint_dict['structure']
+    num_labels = len(checkpoint_dict['class_to_idx'])
+    # GOTCHA: both learning rate and hidden_units should be in the
+    # dict, but they weren't and there's not time to retrain the whole model 
+    hidden_units = 4096
+    learning_rate = 0.001
+    model = load_model(arch_name, learning_rate, hidden_units, num_labels)
+    model.to(device)
+    with torch.no_grad():
+        # https://discuss.pytorch.org/t/expected-stride-to-be-a-single-integer-value-or-a-list/17612
+        image = image.to(device).unsqueeze_(0)
+        image = image.float()
+        top_k_results = model(image).topk(top_k)
+        
+        # convert torch => numpy
+        # https://github.com/pytorch/vision/issues/432#issuecomment-368330817
+        if str(device) == 'cuda':
+            probs = torch.nn.functional.softmax(top_k_results[0].data, dim=1).cpu().numpy()[0]
+            classes = top_k_results[1].data.cpu().numpy()[0]
+        else:
+            probs = torch.nn.functional.softmax(top_k_results[0].data, dim=1).numpy()[0]
+            classes = top_k_results[1].data.numpy()[0]
+        
+        with open('cat_to_name.json', 'r') as f:
+            cats = json.load(f)
 
-      output = model(image).topk(top_k)
-      probabilities = torch.nn.functional.softmax(output[0].data, dim=1).cpu().numpy()[0]
-      classes = output[1].data.cpu().numpy()[0]
-      print(probabilities)
-      print(classes)
-      # return probabilities.topk(top_k)
-
-def load_model_from_checkpoint(checkpoint):
-  checkpoint = torch.load(checkpoint)
-  num_labels = len(checkpoint['class_to_idx'])
-  arch_name = checkpoint['arch_name']
-  hidden_units = checkpoint['hidden_units']
-  model = load_model(arch_name, 0.001, hidden_units, num_labels)
-  model.class_to_idx = checkpoint['class_to_idx']
-  model.load_state_dict(checkpoint['state_dict'])
-
-  return model
+        labels = list(cats.values())
+        class_labels = [labels[x] for x in classes]
+        print('-----------------------')
+        print('Prediction, probability')
+        print('-----------------------')
+        print (list(zip(class_labels, probs)))
 
 def image_to_numpy(image_path):
   image_norm_mean = [0.485, 0.456, 0.406]
